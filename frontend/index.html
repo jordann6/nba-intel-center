@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NBA Intel Center</title>
+    <link rel="stylesheet" href="static/style.css" />
+  </head>
+  <body>
+    <div id="password-gate">
+      <div class="gate-card">
+        <h1>NBA <span>Intel</span> Center</h1>
+        <p>Enter access code to continue</p>
+        <input type="password" id="password-input" placeholder="Access code" />
+        <button onclick="checkPassword()">Enter</button>
+        <p id="gate-error"></p>
+      </div>
+    </div>
+
+    <div id="app" class="hidden">
+      <header>
+        <div class="logo">NBA <span>Intel</span> Center</div>
+        <div class="live-badge">live</div>
+      </header>
+
+      <main>
+        <section class="left-panel">
+          <div class="card">
+            <div class="section-label">Tonight's games</div>
+            <div id="games-grid" class="games-grid">
+              <div class="loading-text">Loading games...</div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="section-label">Player lookup</div>
+            <div class="search-row">
+              <input
+                type="text"
+                id="player-input"
+                placeholder="Player name..."
+              />
+              <select id="stat-select">
+                <option value="PTS">Points</option>
+                <option value="AST">Assists</option>
+                <option value="REB">Rebounds</option>
+              </select>
+            </div>
+            <div id="stat-cards" class="stat-row hidden">
+              <div class="stat-card">
+                <div class="stat-label">Season avg</div>
+                <div class="stat-value" id="season-avg">--</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-label">Last 5 avg</div>
+                <div class="stat-value" id="last5-avg">--</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-label">Prop line</div>
+                <div class="stat-value" id="prop-line-display">--</div>
+              </div>
+            </div>
+            <div class="prop-row">
+              <input
+                type="number"
+                id="prop-input"
+                placeholder="Prop line e.g. 24.5"
+                step="0.5"
+              />
+              <button onclick="analyzeProp()">Analyze</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="right-panel">
+          <div class="card chat-card">
+            <div class="section-label">Ask the analyst</div>
+            <div id="chat-messages" class="chat-messages">
+              <div class="msg msg-ai">
+                Select a game and player to get started. I'll analyze the prop
+                line and give you a clear over or under lean.
+              </div>
+            </div>
+            <div class="chat-input-row">
+              <input
+                type="text"
+                id="chat-input"
+                placeholder="Ask about any player or prop..."
+              />
+              <button onclick="sendMessage()">Send</button>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="static/app.js"></script>
+  </body>
+</html>

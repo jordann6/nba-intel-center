@@ -1,0 +1,8 @@
+nba_api
+qdrant-client
+openai
+fastapi
+uvicorn
+streamlit
+python-dotenv
+requests

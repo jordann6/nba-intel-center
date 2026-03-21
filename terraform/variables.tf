@@ -24,3 +24,9 @@ variable "client_secret" {
   type        = string
   sensitive   = true
 }
+
+variable "alert_email" {
+  description = "Email for budget alerts"
+  type        = string
+  sensitive   = true
+}

@@ -41,3 +41,29 @@ resource "azurerm_cognitive_deployment" "gpt4o" {
     capacity = 10
   }
 }
+
+resource "azurerm_consumption_budget_resource_group" "nba_intel_budget" {
+  name              = "nba-intel-budget"
+  resource_group_id = azurerm_resource_group.nba_intel.id
+  amount            = 20
+  time_grain        = "Monthly"
+
+  time_period {
+    start_date = "2026-04-01T00:00:00Z"
+    end_date   = "2027-04-01T00:00:00Z"
+  }
+
+  notification {
+    enabled        = true
+    threshold      = 80
+    operator       = "GreaterThan"
+    contact_emails = [var.alert_email]
+  }
+
+  notification {
+    enabled        = true
+    threshold      = 100
+    operator       = "GreaterThan"
+    contact_emails = [var.alert_email]
+  }
+}

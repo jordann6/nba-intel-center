@@ -1,10 +1,47 @@
-const PASSWORD = "nbaintel2026";
-const API_BASE = "http://localhost:8000";
-
+const API_BASE = "https://ppc-epinions-life-gentleman.trycloudflare.com";
+let PASSWORD = null;
 let selectedGame = null;
 let lastAnalysis = null;
 
+// ── Init ──────────────────────────────────────────────────────────────────────
+async function loadConfig() {
+  const input = document.getElementById("password-input");
+  const btn = document.querySelector("#password-gate button");
+
+  if (input) {
+    input.disabled = true;
+    input.placeholder = "Loading...";
+  }
+  if (btn) {
+    btn.disabled = true;
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/config`);
+    const data = await res.json();
+    PASSWORD = data.password;
+  } catch (e) {
+    console.error("Could not load config.", e);
+    if (input) input.placeholder = "Config error — refresh page";
+    return;
+  }
+
+  if (input) {
+    input.disabled = false;
+    input.placeholder = "Access code";
+  }
+  if (btn) {
+    btn.disabled = false;
+  }
+  input?.focus();
+}
+
 function checkPassword() {
+  if (!PASSWORD) {
+    document.getElementById("gate-error").textContent =
+      "Config still loading, try again in a moment.";
+    return;
+  }
   const input = document.getElementById("password-input").value;
   if (input === PASSWORD) {
     document.getElementById("password-gate").classList.add("hidden");
@@ -19,25 +56,21 @@ function checkPassword() {
 document.getElementById("password-input")?.addEventListener("keydown", (e) => {
   if (e.key === "Enter") checkPassword();
 });
-
 document.getElementById("chat-input")?.addEventListener("keydown", (e) => {
   if (e.key === "Enter") sendMessage();
 });
 
-// ── Games ────────────────────────────────────────────────────────────────────
-
+// ── Games ─────────────────────────────────────────────────────────────────────
 async function loadGames() {
   try {
     const res = await fetch(`${API_BASE}/games`);
     const data = await res.json();
     const grid = document.getElementById("games-grid");
     grid.innerHTML = "";
-
     if (!data.games || data.games.length === 0) {
       grid.innerHTML = '<div class="loading-text">No games tonight.</div>';
       return;
     }
-
     data.games.forEach((game) => {
       const card = document.createElement("div");
       card.className = "game-card";
@@ -71,8 +104,7 @@ function formatTime(iso) {
   });
 }
 
-// ── Analyze ──────────────────────────────────────────────────────────────────
-
+// ── Analyze ───────────────────────────────────────────────────────────────────
 async function analyzeProp() {
   const player = document.getElementById("player-input").value.trim();
   const stat = document.getElementById("stat-select").value;
@@ -96,20 +128,16 @@ async function analyzeProp() {
         prop_line: parseFloat(line),
       }),
     });
-
     if (!res.ok) {
       const err = await res.json();
       removeLastMessage();
       appendMessage("ai", `Error: ${err.detail ?? "Something went wrong."}`);
       return;
     }
-
     const data = await res.json();
     lastAnalysis = data;
-
     removeLastMessage();
     appendAnalysis(data);
-
     document.getElementById("season-avg").textContent = data.season_avg ?? "--";
     document.getElementById("last5-avg").textContent = data.last5_avg ?? "--";
     document.getElementById("prop-line-display").textContent = line;
@@ -123,8 +151,7 @@ async function analyzeProp() {
   }
 }
 
-// ── Chat ─────────────────────────────────────────────────────────────────────
-
+// ── Chat ──────────────────────────────────────────────────────────────────────
 async function sendMessage() {
   const input = document.getElementById("chat-input");
   const text = input.value.trim();
@@ -133,7 +160,6 @@ async function sendMessage() {
   appendMessage("user", text);
   appendMessage("ai", "Thinking...");
 
-  // Pass the last analysis as context if available
   const context = lastAnalysis
     ? `The user just analyzed ${lastAnalysis.player} ${lastAnalysis.stat} with a prop line of ${lastAnalysis.prop_line}. Season avg: ${lastAnalysis.season_avg}, last 5 avg: ${lastAnalysis.last5_avg}. Lean: ${lastAnalysis.lean}. Reasoning: ${lastAnalysis.reasoning}`
     : null;
@@ -144,14 +170,12 @@ async function sendMessage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message: text, context }),
     });
-
     if (!res.ok) {
       const err = await res.json();
       removeLastMessage();
       appendMessage("ai", `Error: ${err.detail ?? "Something went wrong."}`);
       return;
     }
-
     const data = await res.json();
     removeLastMessage();
     appendMessage("ai", data.response);
@@ -165,7 +189,6 @@ async function sendMessage() {
 }
 
 // ── UI helpers ────────────────────────────────────────────────────────────────
-
 function appendMessage(role, text) {
   const container = document.getElementById("chat-messages");
   const div = document.createElement("div");
@@ -194,3 +217,6 @@ function removeLastMessage() {
   const container = document.getElementById("chat-messages");
   if (container.lastChild) container.removeChild(container.lastChild);
 }
+
+// ── Load config on startup ────────────────────────────────────────────────────
+loadConfig();

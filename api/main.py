@@ -1,5 +1,6 @@
 import os
 import json
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -8,7 +9,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import AzureOpenAI
-from nba_api.stats.endpoints import playergamelog, commonallplayers
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct
+from nba_api.stats.endpoints import playergamelog
 from nba_api.stats.static import players as nba_players_static
 from dotenv import load_dotenv
 
@@ -24,15 +27,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Clients ───────────────────────────────────────────────────────────────────
+
 client = AzureOpenAI(
     api_key=os.getenv("AZURE_OPENAI_KEY"),
     azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
     api_version="2024-02-01",
 )
 
+qdrant = QdrantClient(
+    host=os.getenv("QDRANT_HOST", "localhost"),
+    port=int(os.getenv("QDRANT_PORT", 6333)),
+)
+
 DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 ODDS_BASE_URL = "https://api.the-odds-api.com/v4"
+COLLECTION_NAME = "nba_analyses"
+EMBED_MODEL = "text-embedding-3-small"
+VECTOR_SIZE = 1536
 
 STAT_MAP = {
     "points": "PTS",
@@ -55,7 +68,19 @@ STAT_MAP = {
 }
 
 
-# ── Request/Response models ──────────────────────────────────────────────────
+# ── Startup: ensure Qdrant collection exists ──────────────────────────────────
+
+@app.on_event("startup")
+def init_qdrant():
+    existing = [c.name for c in qdrant.get_collections().collections]
+    if COLLECTION_NAME not in existing:
+        qdrant.create_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
+        )
+
+
+# ── Request/Response models ───────────────────────────────────────────────────
 
 class AnalyzeRequest(BaseModel):
     player_name: str
@@ -67,7 +92,7 @@ class ChatRequest(BaseModel):
     context: Optional[str] = None
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def resolve_stat_key(raw: str) -> str:
     return STAT_MAP.get(raw.lower().strip(), raw.upper())
@@ -76,7 +101,6 @@ def resolve_stat_key(raw: str) -> str:
 def lookup_player_id(name: str) -> int:
     matches = nba_players_static.find_players_by_full_name(name)
     if not matches:
-        # Fallback: partial first/last name search
         parts = name.strip().split()
         all_players = nba_players_static.get_active_players()
         for p in all_players:
@@ -86,14 +110,13 @@ def lookup_player_id(name: str) -> int:
     return matches[0]["id"]
 
 
-def fetch_game_log(player_id: int, season: str = "2025-26", last_n: int = 5):
+def fetch_game_log(player_id: int, season: str = "2025-26"):
     log = playergamelog.PlayerGameLog(
         player_id=player_id,
         season=season,
         season_type_all_star="Regular Season",
     )
-    df = log.get_data_frames()[0]
-    return df
+    return log.get_data_frames()[0]
 
 
 def compute_averages(df, stat_key: str, last_n: int = 5):
@@ -106,6 +129,45 @@ def compute_averages(df, stat_key: str, last_n: int = 5):
     last5_avg = round(float(df.head(last_n)[stat_key].mean()), 1)
     last5_values = df.head(last_n)[stat_key].tolist()
     return season_avg, last5_avg, last5_values
+
+
+def embed_text(text: str) -> list[float]:
+    response = client.embeddings.create(
+        model=EMBED_MODEL,
+        input=text,
+    )
+    return response.data[0].embedding
+
+
+def store_analysis(analysis: dict):
+    text = (
+        f"{analysis['player']} {analysis['stat']} prop line {analysis['prop_line']}. "
+        f"Season avg {analysis['season_avg']}, last 5 avg {analysis['last5_avg']}. "
+        f"Lean: {analysis['lean']}. Confidence: {analysis['confidence']}. "
+        f"{analysis['summary']} {analysis['reasoning']}"
+    )
+    vector = embed_text(text)
+    qdrant.upsert(
+        collection_name=COLLECTION_NAME,
+        points=[
+            PointStruct(
+                id=str(uuid.uuid4()),
+                vector=vector,
+                payload={**analysis, "timestamp": datetime.now(timezone.utc).isoformat()},
+            )
+        ],
+    )
+
+
+def retrieve_relevant_analyses(query: str, limit: int = 3) -> list[dict]:
+    vector = embed_text(query)
+    results = qdrant.search(
+        collection_name=COLLECTION_NAME,
+        query_vector=vector,
+        limit=limit,
+        with_payload=True,
+    )
+    return [r.payload for r in results]
 
 
 def build_analysis_prompt(
@@ -141,7 +203,15 @@ Rules:
 """.strip()
 
 
-# ── Routes ───────────────────────────────────────────────────────────────────
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.get("/config")
+def config():
+    password = os.getenv("APP_PASSWORD")
+    if not password:
+        raise HTTPException(status_code=500, detail="APP_PASSWORD not configured.")
+    return {"password": password}
+
 
 @app.get("/games")
 def get_games():
@@ -228,7 +298,7 @@ def analyze_prop(req: AnalyzeRequest):
             "reasoning": "",
         }
 
-    return {
+    result = {
         "player": req.player_name,
         "stat": req.stat_category,
         "prop_line": req.prop_line,
@@ -240,6 +310,13 @@ def analyze_prop(req: AnalyzeRequest):
         "summary": ai_output.get("summary"),
         "reasoning": ai_output.get("reasoning"),
     }
+
+    try:
+        store_analysis(result)
+    except Exception as e:
+        print(f"Qdrant store error: {e}")
+
+    return result
 
 
 @app.post("/chat")
@@ -253,11 +330,23 @@ def chat(req: ChatRequest):
 
     messages = [{"role": "system", "content": system_prompt}]
 
+    try:
+        past = retrieve_relevant_analyses(req.message)
+        if past:
+            rag_context = "Relevant past analyses:\n" + "\n".join(
+                f"- {p['player']} {p['stat']} (line {p['prop_line']}): "
+                f"Lean {p['lean']}, {p['confidence']} confidence. {p['summary']}"
+                for p in past
+            )
+            messages.append({"role": "system", "content": rag_context})
+    except Exception as e:
+        print(f"Qdrant retrieve error: {e}")
+
     if req.context:
         messages.append(
             {
                 "role": "system",
-                "content": f"Additional context for this conversation:\n{req.context}",
+                "content": f"Current session context:\n{req.context}",
             }
         )
 
@@ -273,8 +362,20 @@ def chat(req: ChatRequest):
     return {"response": completion.choices[0].message.content.strip()}
 
 
-# ── Health check ─────────────────────────────────────────────────────────────
+# ── Health check ──────────────────────────────────────────────────────────────
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "deployment": DEPLOYMENT}
+    try:
+        collections = [c.name for c in qdrant.get_collections().collections]
+        qdrant_status = "ok"
+    except Exception:
+        collections = []
+        qdrant_status = "unreachable"
+
+    return {
+        "status": "ok",
+        "deployment": DEPLOYMENT,
+        "qdrant": qdrant_status,
+        "collections": collections,
+    }

@@ -5,4 +5,4 @@ fastapi
 uvicorn
 streamlit
 python-dotenv
-requests
+requestsqdrant-client>=1.9.0

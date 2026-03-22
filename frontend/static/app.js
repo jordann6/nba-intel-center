@@ -2,7 +2,7 @@ const PASSWORD = "nbaintel2026";
 const API_BASE = "http://localhost:8000";
 
 let selectedGame = null;
-let playerStats = null;
+let lastAnalysis = null;
 
 function checkPassword() {
   const input = document.getElementById("password-input").value;
@@ -24,13 +24,21 @@ document.getElementById("chat-input")?.addEventListener("keydown", (e) => {
   if (e.key === "Enter") sendMessage();
 });
 
+// ── Games ────────────────────────────────────────────────────────────────────
+
 async function loadGames() {
   try {
     const res = await fetch(`${API_BASE}/games`);
-    const games = await res.json();
+    const data = await res.json();
     const grid = document.getElementById("games-grid");
     grid.innerHTML = "";
-    games.forEach((game, i) => {
+
+    if (!data.games || data.games.length === 0) {
+      grid.innerHTML = '<div class="loading-text">No games tonight.</div>';
+      return;
+    }
+
+    data.games.forEach((game) => {
       const card = document.createElement("div");
       card.className = "game-card";
       card.innerHTML = `
@@ -63,6 +71,8 @@ function formatTime(iso) {
   });
 }
 
+// ── Analyze ──────────────────────────────────────────────────────────────────
+
 async function analyzeProp() {
   const player = document.getElementById("player-input").value.trim();
   const stat = document.getElementById("stat-select").value;
@@ -80,9 +90,23 @@ async function analyzeProp() {
     const res = await fetch(`${API_BASE}/analyze`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ player, stat, line: parseFloat(line) }),
+      body: JSON.stringify({
+        player_name: player,
+        stat_category: stat,
+        prop_line: parseFloat(line),
+      }),
     });
+
+    if (!res.ok) {
+      const err = await res.json();
+      removeLastMessage();
+      appendMessage("ai", `Error: ${err.detail ?? "Something went wrong."}`);
+      return;
+    }
+
     const data = await res.json();
+    lastAnalysis = data;
+
     removeLastMessage();
     appendAnalysis(data);
 
@@ -99,6 +123,8 @@ async function analyzeProp() {
   }
 }
 
+// ── Chat ─────────────────────────────────────────────────────────────────────
+
 async function sendMessage() {
   const input = document.getElementById("chat-input");
   const text = input.value.trim();
@@ -107,12 +133,25 @@ async function sendMessage() {
   appendMessage("user", text);
   appendMessage("ai", "Thinking...");
 
+  // Pass the last analysis as context if available
+  const context = lastAnalysis
+    ? `The user just analyzed ${lastAnalysis.player} ${lastAnalysis.stat} with a prop line of ${lastAnalysis.prop_line}. Season avg: ${lastAnalysis.season_avg}, last 5 avg: ${lastAnalysis.last5_avg}. Lean: ${lastAnalysis.lean}. Reasoning: ${lastAnalysis.reasoning}`
+    : null;
+
   try {
     const res = await fetch(`${API_BASE}/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text }),
+      body: JSON.stringify({ message: text, context }),
     });
+
+    if (!res.ok) {
+      const err = await res.json();
+      removeLastMessage();
+      appendMessage("ai", `Error: ${err.detail ?? "Something went wrong."}`);
+      return;
+    }
+
     const data = await res.json();
     removeLastMessage();
     appendMessage("ai", data.response);
@@ -124,6 +163,8 @@ async function sendMessage() {
     );
   }
 }
+
+// ── UI helpers ────────────────────────────────────────────────────────────────
 
 function appendMessage(role, text) {
   const container = document.getElementById("chat-messages");
@@ -141,7 +182,7 @@ function appendAnalysis(data) {
   div.innerHTML = `
     ${data.summary}
     <div class="verdict">
-      <div class="verdict-label">Lean: ${data.lean}</div>
+      <div class="verdict-label">Lean: ${data.lean} &mdash; ${data.confidence} confidence</div>
       <div class="verdict-text">${data.reasoning}</div>
     </div>
   `;

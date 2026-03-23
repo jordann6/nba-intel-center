@@ -1,4 +1,4 @@
-const API_BASE = "https://ppc-epinions-life-gentleman.trycloudflare.com";
+const API_BASE = "https://hardly-dave-refugees-shorter.trycloudflare.com";
 let PASSWORD = null;
 let selectedGame = null;
 let lastAnalysis = null;

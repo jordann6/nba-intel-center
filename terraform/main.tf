@@ -36,12 +36,11 @@ resource "azurerm_cognitive_deployment" "gpt4o" {
     version = "2024-11-20"
   }
 
-  sku {
-    name     = "Standard"
+  scale {
+    type     = "Standard"
     capacity = 10
   }
 }
-
 resource "azurerm_consumption_budget_resource_group" "nba_intel_budget" {
   name              = "nba-intel-budget"
   resource_group_id = azurerm_resource_group.nba_intel.id

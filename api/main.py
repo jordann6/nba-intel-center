@@ -1,7 +1,7 @@
 import os
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import requests
@@ -11,8 +11,9 @@ from pydantic import BaseModel
 from openai import AzureOpenAI
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
-from nba_api.stats.endpoints import playergamelog
+from nba_api.stats.endpoints import playergamelog, commonteamroster
 from nba_api.stats.static import players as nba_players_static
+from nba_api.stats.static import teams as nba_teams_static
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -43,6 +44,7 @@ qdrant = QdrantClient(
 DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 ODDS_BASE_URL = "https://api.the-odds-api.com/v4"
+ESPN_INJURIES_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries"
 COLLECTION_NAME = "nba_analyses"
 EMBED_MODEL = "text-embedding-3-small"
 VECTOR_SIZE = 1536
@@ -67,8 +69,13 @@ STAT_MAP = {
     "min": "MIN",
 }
 
+# ── Roster cache ──────────────────────────────────────────────────────────────
+# Populated on first chat request per team, reused across all subsequent ones.
+# Resets on server restart which is fine since you restart daily.
+_roster_cache: dict[str, list[str]] = {}
 
-# ── Startup: ensure Qdrant collection exists ──────────────────────────────────
+
+# ── Startup ───────────────────────────────────────────────────────────────────
 
 @app.on_event("startup")
 def init_qdrant():
@@ -111,24 +118,177 @@ def lookup_player_id(name: str) -> int:
 
 
 def fetch_game_log(player_id: int, season: str = "2025-26"):
-    log = playergamelog.PlayerGameLog(
-        player_id=player_id,
-        season=season,
-        season_type_all_star="Regular Season",
-    )
-    return log.get_data_frames()[0]
+    """
+    Tries playoffs first, falls back to regular season.
+    Ensures correct data is returned as the postseason begins.
+    """
+    for season_type in ("Playoffs", "Regular Season"):
+        log = playergamelog.PlayerGameLog(
+            player_id=player_id,
+            season=season,
+            season_type_all_star=season_type,
+        )
+        df = log.get_data_frames()[0]
+        if not df.empty:
+            return df
+    return df
 
 
-def compute_averages(df, stat_key: str, last_n: int = 5):
+def compute_averages(df, stat_key: str):
     if stat_key not in df.columns:
         raise HTTPException(
             status_code=400,
-            detail=f"Stat '{stat_key}' not available. Try: points, assists, rebounds, etc.",
+            detail=f"Stat '{stat_key}' not available. Try: points, assists, rebounds, steals, blocks, turnovers, etc.",
         )
     season_avg = round(float(df[stat_key].mean()), 1)
-    last5_avg = round(float(df.head(last_n)[stat_key].mean()), 1)
-    last5_values = df.head(last_n)[stat_key].tolist()
-    return season_avg, last5_avg, last5_values
+    last5_avg = round(float(df.head(5)[stat_key].mean()), 1)
+    last5_values = df.head(5)[stat_key].tolist()
+    last10_avg = round(float(df.head(10)[stat_key].mean()), 1)
+    last10_values = df.head(10)[stat_key].tolist()
+    return season_avg, last5_avg, last5_values, last10_avg, last10_values
+
+
+def get_injury_status(player_name: str) -> dict:
+    """
+    Hits the ESPN injuries endpoint and fuzzy matches the player name.
+    Returns a dict with 'status' and 'description'.
+    Falls back to 'Available' if the player is not listed or the request fails.
+    """
+    try:
+        resp = requests.get(ESPN_INJURIES_URL, timeout=5)
+        if resp.status_code != 200:
+            return {"status": "Unknown", "description": "Injury data unavailable."}
+
+        data = resp.json()
+        name_lower = player_name.lower().strip()
+
+        for team in data.get("injuries", []):
+            for injury in team.get("injuries", []):
+                athlete = injury.get("athlete", {})
+                full_name = athlete.get("displayName", "").lower()
+
+                parts = name_lower.split()
+                if all(part in full_name for part in parts):
+                    status = injury.get("status", "Unknown")
+                    description = injury.get("details", {}).get("detail", "No details available.")
+                    return {"status": status, "description": description}
+
+        return {"status": "Available", "description": "No injury report found. Assumed available."}
+
+    except Exception as e:
+        print(f"Injury fetch error: {e}")
+        return {"status": "Unknown", "description": "Could not retrieve injury data."}
+
+
+def fetch_injured_players() -> dict[str, str]:
+    """
+    Fetches all current injuries from ESPN and returns a flat lookup:
+    player name (lowercase) -> status string.
+    Used to annotate rosters in the chat context block.
+    """
+    try:
+        resp = requests.get(ESPN_INJURIES_URL, timeout=5)
+        if resp.status_code != 200:
+            return {}
+        data = resp.json()
+        injured = {}
+        for team in data.get("injuries", []):
+            for injury in team.get("injuries", []):
+                name = injury.get("athlete", {}).get("displayName", "").lower()
+                status = injury.get("status", "")
+                if name:
+                    injured[name] = status
+        return injured
+    except Exception as e:
+        print(f"Injury bulk fetch error: {e}")
+        return {}
+
+
+def get_roster_for_team(team_name: str, season: str = "2025-26") -> list[str]:
+    """
+    Fetches the current live roster for a team via nba_api.
+    Fuzzy matches the Odds API team name against nba_api's team list.
+    Returns a list of player name strings.
+    """
+    if team_name in _roster_cache:
+        return _roster_cache[team_name]
+
+    try:
+        all_teams = nba_teams_static.get_teams()
+        match = None
+        for t in all_teams:
+            if (
+                t["full_name"].lower() == team_name.lower()
+                or t["nickname"].lower() in team_name.lower()
+                or t["city"].lower() in team_name.lower()
+            ):
+                match = t
+                break
+
+        if not match:
+            print(f"Roster lookup: no team match for '{team_name}'")
+            _roster_cache[team_name] = []
+            return []
+
+        roster = commonteamroster.CommonTeamRoster(
+            team_id=match["id"],
+            season=season,
+        )
+        df = roster.get_data_frames()[0]
+        players = df["PLAYER"].tolist()
+        _roster_cache[team_name] = players
+        return players
+
+    except Exception as e:
+        print(f"Roster fetch error for {team_name}: {e}")
+        _roster_cache[team_name] = []
+        return []
+
+
+def get_tonights_games_context() -> str:
+    """
+    Fetches tonight's games and builds a roster-grounded, injury-annotated
+    context block. Players marked Out are flagged so GPT-4o excludes them
+    from recommendations. Questionable/Doubtful players are noted.
+    """
+    try:
+        games_resp = get_games()
+        if not games_resp["games"]:
+            return "Tonight's games: none scheduled."
+
+        injured_players = fetch_injured_players()
+
+        def format_roster(roster: list[str]) -> str:
+            if not roster:
+                return "roster unavailable"
+            out = []
+            for p in roster:
+                status = injured_players.get(p.lower(), "")
+                if status in ("Out", "Injured Reserve", "Suspended"):
+                    out.append(f"{p} (OUT)")
+                elif status in ("Questionable", "Doubtful", "Day-To-Day"):
+                    out.append(f"{p} ({status})")
+                else:
+                    out.append(p)
+            return ", ".join(out)
+
+        lines = []
+        for g in games_resp["games"]:
+            away = g["away_team"]
+            home = g["home_team"]
+            away_roster = get_roster_for_team(away)
+            home_roster = get_roster_for_team(home)
+            lines.append(
+                f"- {away} vs {home}\n"
+                f"  {away} roster: {format_roster(away_roster)}\n"
+                f"  {home} roster: {format_roster(home_roster)}"
+            )
+
+        return "Tonight's games and current rosters (injury status noted):\n" + "\n".join(lines)
+
+    except Exception as e:
+        print(f"Games context error: {e}")
+        return "Tonight's games: unavailable."
 
 
 def embed_text(text: str) -> list[float]:
@@ -140,9 +300,16 @@ def embed_text(text: str) -> list[float]:
 
 
 def store_analysis(analysis: dict):
+    trend = (
+        "trending up" if analysis["last5_avg"] > analysis["last10_avg"]
+        else "trending down" if analysis["last5_avg"] < analysis["last10_avg"]
+        else "steady"
+    )
     text = (
         f"{analysis['player']} {analysis['stat']} prop line {analysis['prop_line']}. "
-        f"Season avg {analysis['season_avg']}, last 5 avg {analysis['last5_avg']}. "
+        f"Season avg {analysis['season_avg']}, last 10 avg {analysis['last10_avg']}, "
+        f"last 5 avg {analysis['last5_avg']} ({trend}). "
+        f"Injury status: {analysis['injury_status']} — {analysis['injury_description']}. "
         f"Lean: {analysis['lean']}. Confidence: {analysis['confidence']}. "
         f"{analysis['summary']} {analysis['reasoning']}"
     )
@@ -177,27 +344,40 @@ def build_analysis_prompt(
     season_avg: float,
     last5_avg: float,
     last5_values: list,
+    last10_avg: float,
+    last10_values: list,
+    injury_status: str,
+    injury_description: str,
 ) -> str:
+    trend = (
+        "trending up" if last5_avg > last10_avg
+        else "trending down" if last5_avg < last10_avg
+        else "steady"
+    )
     return f"""
 You are a sharp NBA prop analyst helping casual fans make informed bets. Be conversational, direct, and confident.
 
 Player: {player_name}
 Prop: {stat_label} — Line: {prop_line}
 Season average: {season_avg}
-Last 5 game average: {last5_avg}
+Last 10 game average: {last10_avg}
+Last 5 game average: {last5_avg} ({trend} vs last 10)
 Last 5 game values: {last5_values}
+Injury status: {injury_status} — {injury_description}
 
 Analyze this prop and respond with ONLY a valid JSON object in this exact format:
 {{
-  "lean": "Over" or "Under",
+  "lean": "Over", "Under", or "N/A — Player Out",
   "confidence": "Low", "Medium", or "High",
   "summary": "One sentence bottom line for a casual fan.",
-  "reasoning": "Two to three sentences explaining the trend, any relevant context, and why the lean makes sense."
+  "reasoning": "Two to three sentences explaining the trend, momentum direction, injury context if relevant, and why the lean makes sense."
 }}
 
 Rules:
-- Lean toward the last 5 trend more than the season average unless there is a clear reason not to.
-- Confidence should reflect how clear the signal is, not just whether the averages beat the line.
+- If the injury status is "Out", set lean to "N/A — Player Out" and confidence to "N/A", and explain in the summary that the player is ruled out.
+- If the status is "Questionable" or "Doubtful", factor uncertainty into the confidence level and mention it in the reasoning.
+- Use the trend direction (last 5 vs last 10) as a momentum signal alongside the raw averages.
+- Confidence should reflect how clear the signal is across both windows, not just whether the averages beat the line.
 - Write like a knowledgeable friend, not a robot. No bullet points, no jargon.
 - Return ONLY the JSON object with no markdown, no preamble.
 """.strip()
@@ -236,13 +416,14 @@ def get_games():
 
     games_raw = resp.json()
     today = datetime.now(timezone.utc).date()
+    tomorrow = today + timedelta(days=1)
 
     games = []
     for game in games_raw:
         commence = datetime.fromisoformat(
             game["commence_time"].replace("Z", "+00:00")
         )
-        if commence.date() == today:
+        if commence.date() in (today, tomorrow):
             games.append(
                 {
                     "id": game["id"],
@@ -268,7 +449,9 @@ def analyze_prop(req: AnalyzeRequest):
             detail=f"No game log found for {req.player_name} in the 2025-26 season.",
         )
 
-    season_avg, last5_avg, last5_values = compute_averages(df, stat_key)
+    season_avg, last5_avg, last5_values, last10_avg, last10_values = compute_averages(df, stat_key)
+
+    injury = get_injury_status(req.player_name)
 
     prompt = build_analysis_prompt(
         player_name=req.player_name,
@@ -277,6 +460,10 @@ def analyze_prop(req: AnalyzeRequest):
         season_avg=season_avg,
         last5_avg=last5_avg,
         last5_values=last5_values,
+        last10_avg=last10_avg,
+        last10_values=last10_values,
+        injury_status=injury["status"],
+        injury_description=injury["description"],
     )
 
     completion = client.chat.completions.create(
@@ -305,6 +492,10 @@ def analyze_prop(req: AnalyzeRequest):
         "season_avg": season_avg,
         "last5_avg": last5_avg,
         "last5_values": last5_values,
+        "last10_avg": last10_avg,
+        "last10_values": last10_values,
+        "injury_status": injury["status"],
+        "injury_description": injury["description"],
         "lean": ai_output.get("lean"),
         "confidence": ai_output.get("confidence"),
         "summary": ai_output.get("summary"),
@@ -321,11 +512,19 @@ def analyze_prop(req: AnalyzeRequest):
 
 @app.post("/chat")
 def chat(req: ChatRequest):
+    games_context = get_tonights_games_context()
+
     system_prompt = (
         "You are NBA Intel, a sharp and friendly NBA analyst. "
         "You help fans understand player props, stats, and matchups. "
         "Be concise, conversational, and direct. No bullet points unless the user asks. "
-        "If you don't know something specific, say so plainly."
+        "If you don't know something specific, say so plainly. "
+        "Always remind users to verify current injury status before placing any bet. "
+        "Only recommend players who appear in the roster lists below. "
+        "Do not recommend any player marked as OUT — they are not playing tonight. "
+        "For players marked Questionable or Doubtful, note the uncertainty in your response. "
+        "Do not suggest any player not listed in tonight's rosters. "
+        f"{games_context}"
     )
 
     messages = [{"role": "system", "content": system_prompt}]

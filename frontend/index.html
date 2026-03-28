@@ -16,13 +16,11 @@
         <p id="gate-error"></p>
       </div>
     </div>
-
     <div id="app" class="hidden">
       <header>
         <div class="logo">NBA <span>Intel</span> Center</div>
         <div class="live-badge">live</div>
       </header>
-
       <main>
         <section class="left-panel">
           <div class="card">
@@ -31,7 +29,6 @@
               <div class="loading-text">Loading games...</div>
             </div>
           </div>
-
           <div class="card">
             <div class="section-label">Player lookup</div>
             <div class="search-row">
@@ -44,6 +41,10 @@
                 <option value="PTS">Points</option>
                 <option value="AST">Assists</option>
                 <option value="REB">Rebounds</option>
+                <option value="STL">Steals</option>
+                <option value="BLK">Blocks</option>
+                <option value="TOV">Turnovers</option>
+                <option value="FG3M">3-Pointers Made</option>
               </select>
             </div>
             <div id="stat-cards" class="stat-row hidden">
@@ -52,12 +53,20 @@
                 <div class="stat-value" id="season-avg">--</div>
               </div>
               <div class="stat-card">
+                <div class="stat-label">Last 10 avg</div>
+                <div class="stat-value" id="last10-avg">--</div>
+              </div>
+              <div class="stat-card">
                 <div class="stat-label">Last 5 avg</div>
                 <div class="stat-value" id="last5-avg">--</div>
               </div>
               <div class="stat-card">
                 <div class="stat-label">Prop line</div>
                 <div class="stat-value" id="prop-line-display">--</div>
+              </div>
+              <div class="stat-card" id="injury-card">
+                <div class="stat-label">Injury</div>
+                <div class="stat-value" id="injury-status">--</div>
               </div>
             </div>
             <div class="prop-row">
@@ -71,7 +80,6 @@
             </div>
           </div>
         </section>
-
         <section class="right-panel">
           <div class="card chat-card">
             <div class="section-label">Ask the analyst</div>
@@ -93,7 +101,6 @@
         </section>
       </main>
     </div>
-
     <script src="static/app.js"></script>
   </body>
 </html>

@@ -1,4 +1,4 @@
-const API_BASE = "https://hardly-dave-refugees-shorter.trycloudflare.com";
+const API_BASE = "https://estimation-virtually-iron-tile.trycloudflare.com";
 let PASSWORD = null;
 let selectedGame = null;
 let lastAnalysis = null;
@@ -104,6 +104,32 @@ function formatTime(iso) {
   });
 }
 
+// ── Injury color coding ───────────────────────────────────────────────────────
+function setInjuryCard(status) {
+  const card = document.getElementById("injury-card");
+  const value = document.getElementById("injury-status");
+  value.textContent = status ?? "--";
+
+  // reset classes
+  card.classList.remove(
+    "injury-ok",
+    "injury-warn",
+    "injury-out",
+    "injury-unknown",
+  );
+
+  const s = (status ?? "").toLowerCase();
+  if (s === "available" || s === "active") {
+    card.classList.add("injury-ok");
+  } else if (s === "questionable" || s === "doubtful" || s === "day-to-day") {
+    card.classList.add("injury-warn");
+  } else if (s === "out" || s === "injured reserve" || s === "suspended") {
+    card.classList.add("injury-out");
+  } else {
+    card.classList.add("injury-unknown");
+  }
+}
+
 // ── Analyze ───────────────────────────────────────────────────────────────────
 async function analyzeProp() {
   const player = document.getElementById("player-input").value.trim();
@@ -139,8 +165,10 @@ async function analyzeProp() {
     removeLastMessage();
     appendAnalysis(data);
     document.getElementById("season-avg").textContent = data.season_avg ?? "--";
+    document.getElementById("last10-avg").textContent = data.last10_avg ?? "--";
     document.getElementById("last5-avg").textContent = data.last5_avg ?? "--";
     document.getElementById("prop-line-display").textContent = line;
+    setInjuryCard(data.injury_status);
     document.getElementById("stat-cards").classList.remove("hidden");
   } catch (e) {
     removeLastMessage();
@@ -161,7 +189,7 @@ async function sendMessage() {
   appendMessage("ai", "Thinking...");
 
   const context = lastAnalysis
-    ? `The user just analyzed ${lastAnalysis.player} ${lastAnalysis.stat} with a prop line of ${lastAnalysis.prop_line}. Season avg: ${lastAnalysis.season_avg}, last 5 avg: ${lastAnalysis.last5_avg}. Lean: ${lastAnalysis.lean}. Reasoning: ${lastAnalysis.reasoning}`
+    ? `The user just analyzed ${lastAnalysis.player} ${lastAnalysis.stat} with a prop line of ${lastAnalysis.prop_line}. Season avg: ${lastAnalysis.season_avg}, last 10 avg: ${lastAnalysis.last10_avg}, last 5 avg: ${lastAnalysis.last5_avg}. Injury status: ${lastAnalysis.injury_status} — ${lastAnalysis.injury_description}. Lean: ${lastAnalysis.lean}. Reasoning: ${lastAnalysis.reasoning}`
     : null;
 
   try {

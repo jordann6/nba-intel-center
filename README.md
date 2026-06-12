@@ -1,5 +1,7 @@
 # NBA Intel Center
 
+[![Validate](https://github.com/jordann6/nba-intel-center/actions/workflows/validate.yml/badge.svg)](https://github.com/jordann6/nba-intel-center/actions/workflows/validate.yml)
+
 A real-time player prop analysis engine that pairs live betting lines with historical NBA data, powered by Azure OpenAI GPT-4o and a vector-based memory system for context-aware intelligence across sessions.
 
 ![FastAPI](https://img.shields.io/badge/FastAPI-Python-009688?style=flat-square)
